@@ -1,0 +1,9 @@
+RewriteEngine On
+RewriteBase /vpn_api/
+
+# Allow access to specific files
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+
+# Route all requests to index.php
+RewriteRule ^(.*)$ index.php [QSA,L]
