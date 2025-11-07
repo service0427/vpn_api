@@ -34,11 +34,20 @@ The database connection is configured in `config/database.php`:
 
 Three main tables:
 
-1. **vpn_servers**: Stores VPN server information (public_ip, port, server_pubkey)
+1. **vpn_servers**: Stores VPN server information (public_ip, port, server_pubkey, total_keys, available_keys)
 2. **vpn_keys**: Stores client VPN keys (internal_ip, private_key, public_key, usage status)
 3. **vpn_usage_logs**: Tracks allocation/release events for auditing
 
 Key relationship: `vpn_servers` → `vpn_keys` → `vpn_usage_logs` (CASCADE DELETE)
+
+### Database Triggers
+
+Automatic key count synchronization:
+- **INSERT trigger**: Updates `total_keys` and `available_keys` when new keys are added
+- **UPDATE trigger**: Updates `available_keys` when key status changes (allocation/release)
+- **DELETE trigger**: Updates `total_keys` and `available_keys` when keys are removed
+
+The `vpn_servers.total_keys` and `vpn_servers.available_keys` columns are automatically maintained by database triggers, ensuring real-time accuracy without manual intervention.
 
 ### Key Allocation Strategy
 
@@ -51,12 +60,13 @@ Key relationship: `vpn_servers` → `vpn_keys` → `vpn_usage_logs` (CASCADE DEL
 ### Client Endpoints
 - `GET /allocate?ip={public_ip}` - Allocate a VPN key (optionally from specific server)
 - `POST /release` - Release a VPN key (body: `{"public_key": "..."}`)
-- `GET /status?ip={public_ip}` - View server status and active connections
+- `GET /status?ip={public_ip}` - View server status, server list, and active connections
 - `GET /list` - List all available VPN servers
 
 ### Server Registration Endpoints
 - `POST /server/register` - Register or update a VPN server
 - `POST /keys/register` - Bulk register VPN keys for a server
+- `GET /server/heartbeat?ip={public_ip}` - VPN server heartbeat (updates updated_at)
 
 ### Maintenance Endpoints
 - `GET /release/all?ip={public_ip}` - Release all keys (optionally for specific server)
@@ -143,6 +153,14 @@ This process is documented in `REGISTRATION_GUIDE.md` and `QUICK_START.md`.
 - Returns statistics about what was deleted (server info, number of keys, how many were in use)
 - Useful when reinstalling a VPN server and need to start fresh
 - Without `delete=true`, `/release/all` only releases keys without deleting server data
+
+### Heartbeat Health Check
+- VPN servers send heartbeat every 1 minute via `GET /server/heartbeat?ip={public_ip}`
+- Updates `vpn_servers.updated_at` to NOW()
+- Key allocation only uses servers with `TIMESTAMPDIFF(SECOND, updated_at, NOW()) < 90`
+- Servers without heartbeat for 90+ seconds are automatically excluded from allocation
+- No manual intervention needed - failed servers are automatically bypassed
+- VPN server Cron: `* * * * * curl -s "http://API/server/heartbeat?ip=$(curl -s ifconfig.me)" > /dev/null 2>&1`
 
 ## File Structure
 

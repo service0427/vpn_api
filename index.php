@@ -57,6 +57,7 @@ if (empty($path) || $path === 'index.php') {
             'GET /list' => 'VPN 서버 목록 조회',
             'POST /server/register' => 'VPN 서버 등록',
             'POST /keys/register' => 'VPN 키 일괄 등록',
+            'GET /server/heartbeat?ip=[public_ip]' => 'VPN 서버 헬스체크',
             'POST /cleanup' => '오래된 연결 정리'
         ]
     ]);
@@ -163,6 +164,17 @@ if ($path === 'cleanup' && $method === 'POST') {
     $minutes = $requestBody['minutes'] ?? 10;
     $result = $vpnApi->cleanup($minutes);
     $statusCode = $result['success'] ? 200 : 500;
+    sendResponse($statusCode, $result);
+}
+
+// 8. VPN 서버 헬스체크 (하트비트)
+if ($path === 'server/heartbeat' && $method === 'GET') {
+    $public_ip = $query['ip'] ?? null;
+    $interface = $query['interface'] ?? null;
+    $rx_bytes = isset($query['rx']) ? (int)$query['rx'] : null;
+    $tx_bytes = isset($query['tx']) ? (int)$query['tx'] : null;
+    $result = $vpnApi->heartbeat($public_ip, $interface, $rx_bytes, $tx_bytes);
+    $statusCode = $result['success'] ? 200 : 400;
     sendResponse($statusCode, $result);
 }
 

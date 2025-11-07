@@ -158,6 +158,150 @@ curl -s http://220.121.120.83/vpn_api/one_line_register.sh | bash
 
 ---
 
+## VPN 서버 헬스체크 및 트래픽 모니터링
+
+### 개요
+
+VPN 서버는 매 1분마다 중앙 API에 헬스체크(heartbeat)와 트래픽 정보를 전송해야 합니다.
+
+**헬스체크 기능:**
+- **90초 이상 헬스체크가 없으면**: 해당 서버는 자동으로 키 할당에서 제외됨
+- **목적**: 장애 서버에 키 할당 방지, 가용 서버만 사용
+
+**트래픽 모니터링:**
+- **네트워크 인터페이스 RX/TX 바이트 수집**: 일별로 집계 저장
+- **목적**: 서버별 트래픽 사용량 모니터링
+
+### Cron 설정 (트래픽 모니터링 포함)
+
+VPN 서버에 다음 Cron job 추가:
+
+```bash
+# Crontab 편집
+crontab -e
+
+# 다음 줄 추가 (매 1분마다 헬스체크 + 트래픽 전송)
+* * * * * /usr/local/bin/vpn_heartbeat.sh > /dev/null 2>&1
+```
+
+**헬스체크 스크립트 생성:**
+
+```bash
+# 스크립트 생성
+cat > /usr/local/bin/vpn_heartbeat.sh << 'EOF'
+#!/bin/bash
+SERVER_IP=$(curl -s ifconfig.me)
+INTERFACE="eno1"  # 서버의 네트워크 인터페이스 이름 (ifconfig로 확인)
+
+# RX/TX 바이트 수 읽기
+RX=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
+TX=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes)
+
+# API 전송
+curl -s "http://220.121.120.83/vpn_api/server/heartbeat?ip=$SERVER_IP&interface=$INTERFACE&rx=$RX&tx=$TX" > /dev/null 2>&1
+EOF
+
+# 실행 권한 부여
+chmod +x /usr/local/bin/vpn_heartbeat.sh
+```
+
+**한 줄로 Cron 추가:**
+
+```bash
+(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/vpn_heartbeat.sh > /dev/null 2>&1") | crontab -
+```
+
+### 네트워크 인터페이스 확인
+
+서버의 주요 네트워크 인터페이스 이름 확인:
+
+```bash
+# 모든 인터페이스 목록
+ip link show
+
+# 또는
+ifconfig
+```
+
+일반적인 인터페이스 이름:
+- `eth0`, `eth1`: 전통적인 이더넷 인터페이스
+- `eno1`, `eno2`: 최신 리눅스 (Rocky, Ubuntu 등)
+- `ens33`, `ens192`: VMware 가상 머신
+- `enp0s3`: VirtualBox 가상 머신
+
+### 헬스체크 수동 테스트
+
+```bash
+# 서버 IP 확인
+SERVER_IP=$(curl -s ifconfig.me)
+
+# 트래픽 정보 없이 기본 헬스체크
+curl "http://220.121.120.83/vpn_api/server/heartbeat?ip=$SERVER_IP"
+
+# 트래픽 정보 포함 헬스체크 (권장)
+INTERFACE="eno1"
+RX=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
+TX=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes)
+curl "http://220.121.120.83/vpn_api/server/heartbeat?ip=$SERVER_IP&interface=$INTERFACE&rx=$RX&tx=$TX"
+```
+
+**응답:**
+```json
+{
+  "success": true,
+  "message": "Heartbeat received",
+  "server_ip": "111.222.333.444"
+}
+```
+
+### 헬스체크 확인
+
+서버 상태 조회로 마지막 업데이트 시간 확인:
+
+```bash
+curl "http://220.121.120.83/vpn_api/status?ip=$SERVER_IP"
+```
+
+### 트래픽 데이터 확인
+
+트래픽 데이터는 `vpn_traffic_daily` 테이블에 일자별로 저장됩니다:
+
+```bash
+# 데이터베이스 접속
+mysql -u vpnuser -pvpn1324 vpn
+
+# 오늘 수집된 트래픽 데이터 조회
+SELECT
+    server_ip,
+    interface,
+    date,
+    (current_rx_bytes - init_rx_bytes) / 1024 / 1024 / 1024 AS rx_gb,
+    (current_tx_bytes - init_tx_bytes) / 1024 / 1024 / 1024 AS tx_gb,
+    updated_at
+FROM vpn_traffic_daily
+WHERE date = CURDATE()
+ORDER BY updated_at DESC;
+
+# 특정 서버의 최근 7일 트래픽
+SELECT
+    date,
+    interface,
+    ROUND((current_rx_bytes - init_rx_bytes) / 1024 / 1024 / 1024, 2) AS rx_gb,
+    ROUND((current_tx_bytes - init_tx_bytes) / 1024 / 1024 / 1024, 2) AS tx_gb
+FROM vpn_traffic_daily
+WHERE server_ip = '111.222.333.444'
+    AND date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+ORDER BY date DESC;
+```
+
+**참고사항:**
+- `init_*_bytes`: 당일 첫 헬스체크 시 네트워크 카운터 값
+- `current_*_bytes`: 당일 마지막 헬스체크 시 네트워크 카운터 값
+- 실제 사용량 = current - init
+- 서버 재부팅 시 카운터가 0으로 초기화되므로 음수값이 발생할 수 있음
+
+---
+
 ## 서버 상태 관리
 
 ### 등록된 서버 목록 조회

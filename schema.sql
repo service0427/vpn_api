@@ -49,3 +49,20 @@ CREATE TABLE IF NOT EXISTS vpn_usage_logs (
     INDEX idx_status (status),
     INDEX idx_connected_at (connected_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- VPN 트래픽 일별 집계 테이블
+CREATE TABLE IF NOT EXISTS vpn_traffic_daily (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    server_ip VARCHAR(45) NOT NULL,
+    interface VARCHAR(20) NOT NULL,
+    date DATE NOT NULL,
+    init_rx_bytes BIGINT DEFAULT 0,
+    current_rx_bytes BIGINT DEFAULT 0,
+    init_tx_bytes BIGINT DEFAULT 0,
+    current_tx_bytes BIGINT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_daily (server_ip, interface, date),
+    INDEX idx_date (date),
+    INDEX idx_server (server_ip)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

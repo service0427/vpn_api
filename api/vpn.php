@@ -32,6 +32,7 @@ class VpnApi {
                     WHERE k.in_use = 0
                         AND s.is_active = 1
                         AND s.public_ip = ?
+                        AND TIMESTAMPDIFF(SECOND, s.updated_at, NOW()) < 90
                     ORDER BY k.last_used_at ASC, k.use_count ASC
                     LIMIT 1
                     FOR UPDATE
@@ -53,6 +54,7 @@ class VpnApi {
                     JOIN vpn_servers s ON k.server_id = s.id
                     WHERE k.in_use = 0
                         AND s.is_active = 1
+                        AND TIMESTAMPDIFF(SECOND, s.updated_at, NOW()) < 90
                     ORDER BY k.last_used_at ASC, k.use_count ASC
                     LIMIT 1
                     FOR UPDATE
@@ -328,6 +330,55 @@ PersistentKeepalive = 25";
 
             $stats = $statsStmt->fetch();
 
+            // 서버 목록 조회
+            if ($public_ip) {
+                $serverStmt = $this->conn->prepare("
+                    SELECT
+                        s.public_ip,
+                        s.port,
+                        COUNT(k.id) as total_keys,
+                        SUM(CASE WHEN k.in_use = 1 THEN 1 ELSE 0 END) as keys_in_use,
+                        SUM(CASE WHEN k.in_use = 0 THEN 1 ELSE 0 END) as keys_available
+                    FROM vpn_servers s
+                    LEFT JOIN vpn_keys k ON k.server_id = s.id
+                    WHERE s.public_ip = ?
+                        AND s.server_pubkey IS NOT NULL
+                        AND s.server_pubkey != ''
+                        AND s.is_active = 1
+                    GROUP BY s.id, s.public_ip, s.port
+                ");
+                $serverStmt->execute([$public_ip]);
+            } else {
+                $serverStmt = $this->conn->prepare("
+                    SELECT
+                        s.public_ip,
+                        s.port,
+                        COUNT(k.id) as total_keys,
+                        SUM(CASE WHEN k.in_use = 1 THEN 1 ELSE 0 END) as keys_in_use,
+                        SUM(CASE WHEN k.in_use = 0 THEN 1 ELSE 0 END) as keys_available
+                    FROM vpn_servers s
+                    LEFT JOIN vpn_keys k ON k.server_id = s.id
+                    WHERE s.server_pubkey IS NOT NULL
+                        AND s.server_pubkey != ''
+                        AND s.is_active = 1
+                    GROUP BY s.id, s.public_ip, s.port
+                    ORDER BY s.public_ip
+                ");
+                $serverStmt->execute();
+            }
+
+            $servers = $serverStmt->fetchAll();
+
+            // 서버 목록 포맷팅
+            $serverList = array_map(function($server) {
+                return [
+                    'endpoint' => $server['public_ip'] . ':' . $server['port'],
+                    'total_keys' => (int)$server['total_keys'],
+                    'keys_in_use' => (int)($server['keys_in_use'] ?? 0),
+                    'keys_available' => (int)($server['keys_available'] ?? 0)
+                ];
+            }, $servers);
+
             // 현재 사용 중인 키 목록
             if ($public_ip) {
                 $activeStmt = $this->conn->prepare("
@@ -367,6 +418,7 @@ PersistentKeepalive = 25";
                     'keys_in_use' => (int)$stats['keys_in_use'],
                     'keys_available' => (int)$stats['keys_available']
                 ],
+                'server_list' => $serverList,
                 'active_connections' => $activeKeys
             ];
 
@@ -663,6 +715,91 @@ PersistentKeepalive = 25";
                 'success' => false,
                 'error' => 'Failed to delete server: ' . $e->getMessage()
             ];
+        }
+    }
+
+    // 9. VPN 서버 헬스체크 (하트비트)
+    public function heartbeat($public_ip, $interface = null, $rx_bytes = null, $tx_bytes = null) {
+        if (!$public_ip) {
+            return [
+                'success' => false,
+                'error' => 'public_ip is required'
+            ];
+        }
+
+        try {
+            // 서버의 updated_at 업데이트
+            $stmt = $this->conn->prepare("
+                UPDATE vpn_servers
+                SET updated_at = NOW()
+                WHERE public_ip = ? AND is_active = 1
+            ");
+            $stmt->execute([$public_ip]);
+
+            $updated = $stmt->rowCount();
+
+            if ($updated === 0) {
+                return [
+                    'success' => false,
+                    'error' => 'Server not found or not active'
+                ];
+            }
+
+            // 트래픽 데이터가 있으면 저장
+            if ($interface && $rx_bytes !== null && $tx_bytes !== null) {
+                $this->saveTrafficData($public_ip, $interface, $rx_bytes, $tx_bytes);
+            }
+
+            return [
+                'success' => true,
+                'message' => 'Heartbeat received',
+                'server_ip' => $public_ip
+            ];
+
+        } catch (Exception $e) {
+            error_log('Error processing heartbeat: ' . $e->getMessage());
+            return [
+                'success' => false,
+                'error' => 'Failed to process heartbeat'
+            ];
+        }
+    }
+
+    // 트래픽 데이터 저장 (일별 집계)
+    private function saveTrafficData($server_ip, $interface, $rx_bytes, $tx_bytes) {
+        try {
+            $today = date('Y-m-d');
+
+            // 오늘 데이터 조회
+            $checkStmt = $this->conn->prepare("
+                SELECT id FROM vpn_traffic_daily
+                WHERE server_ip = ? AND interface = ? AND date = ?
+            ");
+            $checkStmt->execute([$server_ip, $interface, $today]);
+            $existing = $checkStmt->fetch();
+
+            if ($existing) {
+                // 기존 데이터 업데이트 (current 값만)
+                $updateStmt = $this->conn->prepare("
+                    UPDATE vpn_traffic_daily
+                    SET current_rx_bytes = ?,
+                        current_tx_bytes = ?
+                    WHERE id = ?
+                ");
+                $updateStmt->execute([$rx_bytes, $tx_bytes, $existing['id']]);
+            } else {
+                // 새 데이터 삽입 (init과 current에 동일한 값)
+                $insertStmt = $this->conn->prepare("
+                    INSERT INTO vpn_traffic_daily
+                    (server_ip, interface, date, init_rx_bytes, current_rx_bytes, init_tx_bytes, current_tx_bytes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ");
+                $insertStmt->execute([$server_ip, $interface, $today, $rx_bytes, $rx_bytes, $tx_bytes, $tx_bytes]);
+            }
+
+        } catch (Exception $e) {
+            error_log('Error saving traffic data: ' . $e->getMessage());
+            // 트래픽 저장 실패해도 헬스체크는 성공으로 처리
         }
     }
 
